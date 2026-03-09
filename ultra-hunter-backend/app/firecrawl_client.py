@@ -123,6 +123,8 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
 
     items = []
     if soup:
+        from urllib.parse import urljoin
+
         # Try to find event cards, articles, or list items
         selectors = [
             "article", ".event-card", ".campaign-card", ".challenge-card",
@@ -144,18 +146,57 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
                         if not title:
                             title = item_text[:150]
 
+                        # Extract URL from links - try multiple approaches
+                        item_url = ""
                         links = elem.find_all("a", href=True)
-                        item_url = links[0]["href"] if links else ""
+                        for link in links:
+                            href = link["href"]
+                            # Skip anchor-only or javascript links
+                            if href and not href.startswith("#") and not href.startswith("javascript:"):
+                                item_url = href
+                                break
                         if item_url and not item_url.startswith("http"):
-                            from urllib.parse import urljoin
                             item_url = urljoin(source_url, item_url)
+                        # Always fall back to source URL if no valid URL found
+                        if not item_url:
+                            item_url = source_url
+
                         items.append({
                             "title": title[:200],
                             "url": item_url,
-                            "text": item_text,
+                            "text": item_text[:2000],
                             "source_url": source_url
                         })
                 break
+
+        # If no items found from selectors, extract from page-level headings + links
+        if not items:
+            all_headings = soup.find_all(["h1", "h2", "h3"], limit=20)
+            for heading in all_headings:
+                heading_text = heading.get_text(strip=True)
+                if heading_text and len(heading_text) > 5:
+                    # Find the nearest link
+                    heading_link = heading.find("a", href=True)
+                    if not heading_link:
+                        heading_link = heading.find_parent("a", href=True)
+                    item_url = ""
+                    if heading_link and heading_link.get("href"):
+                        item_url = heading_link["href"]
+                        if not item_url.startswith("http"):
+                            item_url = urljoin(source_url, item_url)
+                    if not item_url:
+                        item_url = source_url
+
+                    # Get surrounding context text
+                    parent = heading.find_parent(["div", "section", "article"])
+                    context_text = parent.get_text(separator=" ", strip=True)[:500] if parent else heading_text
+
+                    items.append({
+                        "title": heading_text[:200],
+                        "url": item_url,
+                        "text": context_text,
+                        "source_url": source_url
+                    })
 
     return {
         "source": source_name,

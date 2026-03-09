@@ -98,21 +98,35 @@ def format_alert_message(detection: dict) -> str:
 
     title = _escape_html(detection.get("title", "Unknown")[:200])
     det_type = _escape_html(detection.get("detection_type", "update"))
-    url = detection.get("url", "")
+    raw_url = detection.get("url", "") or ""
     summary = _escape_html(detection.get("summary", "No summary available")[:500])
     rewards = _escape_html(detection.get("detected_rewards", "")) if detection.get("detected_rewards") else "None detected"
     action = _escape_html(detection.get("action", "Monitor"))
     source = _escape_html(detection.get("source_name", detection.get("source", "Unknown")))
     timestamp = detection.get("created_at", datetime.utcnow().isoformat())
 
+    # Build clickable URL - always show a link
+    if raw_url and raw_url.startswith("http"):
+        url_display = f'<a href="{_escape_html(raw_url)}">{_escape_html(raw_url)}</a>'
+    else:
+        url_display = "N/A"
+
+    # Include content snippet if available
+    content = detection.get("content", "") or detection.get("raw_text", "")
+    content_snippet = ""
+    if content and len(content) > 30:
+        clean_content = _escape_html(content[:300].strip())
+        if clean_content and clean_content != title:
+            content_snippet = f"\n<b>Content:</b> {clean_content}..." if len(content) > 300 else f"\n<b>Content:</b> {clean_content}"
+
     message = (
         f"{emoji} <b>{priority} MANUS UPDATE DETECTED</b>\n\n"
         f"<b>Title:</b> {title}\n"
         f"<b>Type:</b> {det_type}\n"
-        f"<b>URL:</b> {url}\n"
+        f"<b>URL:</b> {url_display}\n"
         f"<b>Summary:</b> {summary}\n"
         f"<b>Rewards:</b> {rewards}\n"
-        f"<b>Recommended Action:</b> {action}\n"
+        f"<b>Recommended Action:</b> {action}{content_snippet}\n"
         f"<b>Source:</b> {source}\n"
         f"<b>Time:</b> {timestamp}"
     )
