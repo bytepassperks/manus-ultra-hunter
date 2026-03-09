@@ -135,15 +135,25 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
                 for elem in elements:
                     item_text = elem.get_text(separator=" ", strip=True)
                     if len(item_text) > 20:
+                        # Extract title from headings first, then links, then text
+                        heading = elem.find(["h1", "h2", "h3", "h4", "h5"])
+                        title = heading.get_text(strip=True) if heading else ""
+                        if not title:
+                            title_link = elem.find("a")
+                            title = title_link.get_text(strip=True) if title_link else ""
+                        if not title:
+                            title = item_text[:150]
+
                         links = elem.find_all("a", href=True)
                         item_url = links[0]["href"] if links else ""
                         if item_url and not item_url.startswith("http"):
                             from urllib.parse import urljoin
                             item_url = urljoin(source_url, item_url)
                         items.append({
-                            "title": item_text[:200],
+                            "title": title[:200],
                             "url": item_url,
-                            "text": item_text
+                            "text": item_text,
+                            "source_url": source_url
                         })
                 break
 
