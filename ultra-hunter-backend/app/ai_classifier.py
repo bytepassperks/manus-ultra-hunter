@@ -92,7 +92,8 @@ def _classify_rule_based(detection_data: dict) -> dict:
     title = detection_data.get("title", "").lower()
     detection_type = detection_data.get("detection_type", "")
     changes_summary = detection_data.get("changes_summary", "").lower()
-    combined_text = f"{title} {content} {changes_summary}"
+    # Only use title and content for keyword matching, NOT nav/boilerplate text
+    combined_text = f"{title} {content}"
 
     keywords = extract_keywords(combined_text)
     credits = extract_credit_info(combined_text)
@@ -102,10 +103,22 @@ def _classify_rule_based(detection_data: dict) -> dict:
     action = "Monitor"
     detected_rewards = ""
 
-    # CRITICAL: new events/campaigns with credits
-    critical_signals = ["event", "credits", "campaign", "pro access", "launch"]
-    high_signals = ["registration", "challenge", "hackathon", "workshop", "deadline", "limited slots"]
-    medium_signals = ["update", "announcement", "new feature", "blog"]
+    # CRITICAL: Specific actionable signals with context
+    # "event" alone is too broad — require more specific phrases
+    critical_signals = [
+        "new event", "live event", "free credits", "pro access",
+        "campaign launch", "new campaign", "limited time", "register now",
+        "credits available", "earn credits",
+    ]
+    high_signals = [
+        "registration open", "new challenge", "hackathon", "workshop",
+        "deadline", "limited slots", "enrollment", "sign up now",
+        "new announcement", "important update",
+    ]
+    medium_signals = [
+        "blog post", "help article", "documentation update",
+        "new feature", "changelog", "release notes",
+    ]
 
     has_critical = any(s in combined_text for s in critical_signals)
     has_high = any(s in combined_text for s in high_signals)
@@ -123,8 +136,13 @@ def _classify_rule_based(detection_data: dict) -> dict:
             priority = "HIGH"
             summary = f"New important update: {title[:100]}"
             action = "Review and consider participating"
-        else:
+        elif has_medium:
             priority = "MEDIUM"
+            summary = f"New content detected: {title[:100]}"
+            action = "Review at convenience"
+        else:
+            # Default new items to LOW unless they match specific signals
+            priority = "LOW"
             summary = f"New content detected: {title[:100]}"
             action = "Review at convenience"
     elif detection_type == "changed_item":
@@ -158,6 +176,8 @@ def _classify_rule_based(detection_data: dict) -> dict:
             priority = "HIGH"
         elif has_high or has_medium:
             priority = "MEDIUM"
+        else:
+            priority = "LOW"
 
         summary = f"Update from {detection_data.get('source', 'unknown')}: {title[:100]}"
         action = "Review"

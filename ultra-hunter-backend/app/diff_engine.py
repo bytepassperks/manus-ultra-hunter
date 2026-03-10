@@ -39,11 +39,11 @@ def compute_content_diff(old_content: Optional[str], new_content: str,
     result = DiffResult()
 
     if old_content is None:
-        result.has_changes = True
-        result.change_severity = "HIGH"
-        result.summary = "First scan - new content detected"
-        if new_items:
-            result.new_items = new_items
+        # First scan: establish baseline, do NOT treat everything as new
+        # This prevents spamming notifications with every element on the page
+        result.has_changes = False
+        result.change_severity = "LOW"
+        result.summary = "First scan - baseline established (no notifications)"
         return result
 
     old_hash = compute_dom_hash(old_content)

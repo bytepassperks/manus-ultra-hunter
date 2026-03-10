@@ -14,6 +14,7 @@ from app.database import (
     get_all_settings, get_setting, set_setting,
     get_all_sources, get_source, upsert_source, delete_source,
     get_detections, get_detection_stats, get_unnotified_detections,
+    reset_all_detections_and_snapshots,
 )
 from app.scheduler import scheduler
 from app.notifier import send_test_notification, process_notification_queue
@@ -268,6 +269,14 @@ async def test_telegram():
     if success:
         return {"status": "ok", "message": "Test notification sent"}
     raise HTTPException(status_code=500, detail="Failed to send test notification")
+
+
+@app.post("/api/actions/reset")
+async def reset_system():
+    """Clear all old detections and snapshots to start fresh."""
+    await reset_all_detections_and_snapshots()
+    logger.info("System reset: all detections and snapshots cleared")
+    return {"status": "ok", "message": "All detections and snapshots cleared. Next scan will establish fresh baseline."}
 
 
 @app.get("/api/dashboard")

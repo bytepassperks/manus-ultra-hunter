@@ -326,6 +326,17 @@ async def delete_source(source_id: int):
         await db.close()
 
 
+async def reset_all_detections_and_snapshots():
+    """Clear all detections and snapshots to start fresh with improved code."""
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM detections")
+        await db.execute("DELETE FROM content_snapshots")
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def seed_default_sources():
     """Seed default Manus monitoring sources."""
     default_sources = [

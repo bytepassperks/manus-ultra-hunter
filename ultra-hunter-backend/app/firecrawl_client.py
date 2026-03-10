@@ -37,7 +37,7 @@ async def scrape_with_firecrawl(url: str, api_key: str) -> Optional[dict]:
                 json={
                     "url": url,
                     "formats": ["html", "markdown"],
-                    "onlyMainContent": False
+                    "onlyMainContent": True
                 }
             )
             if response.status_code == 200:
@@ -113,6 +113,52 @@ async def scrape_direct(url: str) -> Optional[dict]:
         return None
 
 
+# Boilerplate titles/text to ignore (nav items, cookie banners, generic UI elements)
+BOILERPLATE_TITLES = {
+    "product", "resources", "compare", "download", "business", "company",
+    "pricing", "blog", "docs", "updates", "help center", "trust center",
+    "api", "team plan", "startups", "playbook", "brand assets", "community",
+    "events", "fellows", "cookie policy", "privacy policy", "terms of service",
+    "sign in", "sign up", "log in", "log out", "menu", "navigation",
+    "home", "about", "contact", "search", "close", "open", "toggle",
+    "customize", "only essentials", "accept all", "reject all",
+    "vs chatgpt", "vs lovable", "what can i do for you?",
+}
+
+BOILERPLATE_PATTERNS = [
+    "we use cookies", "cookie policy", "privacy policy", "terms of service",
+    "accept all", "only essentials", "customize", "sign in", "sign up",
+    "© 20", "all rights reserved", "follow us", "subscribe",
+    "toggle navigation", "skip to content", "back to top",
+]
+
+
+def _is_boilerplate(title: str, text: str) -> bool:
+    """Check if an item is boilerplate (nav, cookie, footer, etc.)."""
+    title_lower = title.lower().strip()
+    text_lower = text.lower().strip()
+
+    # Reject if title is a known boilerplate term
+    if title_lower in BOILERPLATE_TITLES:
+        return True
+
+    # Reject very short titles that are likely nav items (single words)
+    if len(title_lower) < 15 and " " not in title_lower and title_lower.isalpha():
+        return True
+
+    # Reject if text contains boilerplate patterns
+    for pattern in BOILERPLATE_PATTERNS:
+        if pattern in text_lower:
+            return True
+
+    # Reject items with very little meaningful text (< 50 chars after title)
+    remaining_text = text_lower.replace(title_lower, "").strip()
+    if len(remaining_text) < 30 and len(title_lower) < 50:
+        return True
+
+    return False
+
+
 def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict:
     """Parse scraped data into a standardized format."""
     html = scraped.get("html", "")
@@ -121,23 +167,36 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
 
     soup = BeautifulSoup(html, "html.parser") if html else None
 
+    # Strip boilerplate elements from HTML before parsing
+    if soup:
+        for tag in soup(["nav", "footer", "header", "script", "style", "noscript"]):
+            tag.decompose()
+        # Remove cookie banners and overlays by common class/id patterns
+        for pattern in ["cookie", "consent", "gdpr", "popup", "modal", "overlay",
+                        "banner", "notification-bar", "announcement-bar"]:
+            for elem in soup.find_all(class_=lambda c: c and pattern in str(c).lower()):
+                elem.decompose()
+            for elem in soup.find_all(id=lambda i: i and pattern in str(i).lower()):
+                elem.decompose()
+
     items = []
     if soup:
         from urllib.parse import urljoin
 
-        # Try to find event cards, articles, or list items
+        # Try to find event cards, articles, or meaningful content blocks
+        # Removed overly broad selectors like "section" and "[class*='card']"
         selectors = [
             "article", ".event-card", ".campaign-card", ".challenge-card",
-            ".post-card", ".blog-post", "[class*='event']", "[class*='card']",
-            ".announcement", "section"
+            ".post-card", ".blog-post", ".announcement",
+            "[class*='event-item']", "[class*='campaign-item']",
+            "[class*='challenge-item']",
         ]
         for selector in selectors:
             elements = soup.select(selector)
-            if elements and len(elements) > 0 and len(elements) < 50:
+            if elements and len(elements) > 0 and len(elements) < 30:
                 for elem in elements:
                     item_text = elem.get_text(separator=" ", strip=True)
-                    if len(item_text) > 20:
-                        # Extract title from headings first, then links, then text
+                    if len(item_text) > 50:  # Minimum meaningful content length
                         heading = elem.find(["h1", "h2", "h3", "h4", "h5"])
                         title = heading.get_text(strip=True) if heading else ""
                         if not title:
@@ -146,18 +205,20 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
                         if not title:
                             title = item_text[:150]
 
-                        # Extract URL from links - try multiple approaches
+                        # Skip boilerplate items
+                        if _is_boilerplate(title, item_text):
+                            continue
+
+                        # Extract URL from links
                         item_url = ""
                         links = elem.find_all("a", href=True)
                         for link in links:
                             href = link["href"]
-                            # Skip anchor-only or javascript links
                             if href and not href.startswith("#") and not href.startswith("javascript:"):
                                 item_url = href
                                 break
                         if item_url and not item_url.startswith("http"):
                             item_url = urljoin(source_url, item_url)
-                        # Always fall back to source URL if no valid URL found
                         if not item_url:
                             item_url = source_url
 
@@ -167,36 +228,47 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
                             "text": item_text[:2000],
                             "source_url": source_url
                         })
-                break
+                if items:  # Only break if we actually found meaningful items
+                    break
 
-        # If no items found from selectors, extract from page-level headings + links
+        # Fallback: extract from headings that have substantial surrounding content
         if not items:
-            all_headings = soup.find_all(["h1", "h2", "h3"], limit=20)
+            main_content = soup.find("main") or soup.find("[role='main']") or soup
+            all_headings = main_content.find_all(["h1", "h2", "h3"], limit=15)
             for heading in all_headings:
                 heading_text = heading.get_text(strip=True)
-                if heading_text and len(heading_text) > 5:
-                    # Find the nearest link
-                    heading_link = heading.find("a", href=True)
-                    if not heading_link:
-                        heading_link = heading.find_parent("a", href=True)
-                    item_url = ""
-                    if heading_link and heading_link.get("href"):
-                        item_url = heading_link["href"]
-                        if not item_url.startswith("http"):
-                            item_url = urljoin(source_url, item_url)
-                    if not item_url:
-                        item_url = source_url
+                if not heading_text or len(heading_text) < 10:
+                    continue
 
-                    # Get surrounding context text
-                    parent = heading.find_parent(["div", "section", "article"])
-                    context_text = parent.get_text(separator=" ", strip=True)[:500] if parent else heading_text
+                # Get surrounding context
+                parent = heading.find_parent(["div", "section", "article"])
+                context_text = parent.get_text(separator=" ", strip=True)[:500] if parent else heading_text
 
-                    items.append({
-                        "title": heading_text[:200],
-                        "url": item_url,
-                        "text": context_text,
-                        "source_url": source_url
-                    })
+                # Skip boilerplate
+                if _is_boilerplate(heading_text, context_text):
+                    continue
+
+                # Must have substantial content beyond just the heading
+                if len(context_text) < 80:
+                    continue
+
+                heading_link = heading.find("a", href=True)
+                if not heading_link:
+                    heading_link = heading.find_parent("a", href=True)
+                item_url = ""
+                if heading_link and heading_link.get("href"):
+                    item_url = heading_link["href"]
+                    if not item_url.startswith("http"):
+                        item_url = urljoin(source_url, item_url)
+                if not item_url:
+                    item_url = source_url
+
+                items.append({
+                    "title": heading_text[:200],
+                    "url": item_url,
+                    "text": context_text,
+                    "source_url": source_url
+                })
 
     return {
         "source": source_name,
