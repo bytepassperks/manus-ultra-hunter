@@ -90,22 +90,29 @@ async def check_source(source_id: int) -> dict:
 
             # Process changed items
             for change in diff_result.changed_items:
+                new_text = change.get("new", {}).get("text", "")
+                old_text = change.get("old", {}).get("text", "")
                 detection_data = {
                     "source": source_name,
                     "title": change.get("title", "Changed item"),
-                    "content": change.get("new", {}).get("text", ""),
+                    "content": new_text,
                     "detection_type": "changed_item",
                     "changes_summary": f"Item changed: {change.get('title', '')}"
                 }
                 classification = await classify_update(detection_data)
+
+                # Build human-readable content instead of raw JSON
+                readable_content = new_text[:2000]
+                if old_text and new_text and old_text != new_text:
+                    readable_content = f"Updated content: {new_text[:1500]}"
 
                 det_id = await add_detection(
                     source_id=source_id,
                     detection_type="changed_item",
                     title=change.get("title", "Changed item")[:200],
                     url=change.get("new", {}).get("url") or source_url,
-                    content=json.dumps({"old": change.get("old"), "new": change.get("new")})[:5000],
-                    raw_text=change.get("new", {}).get("text", ""),
+                    content=readable_content[:5000],
+                    raw_text=new_text,
                     detected_fields=change,
                     priority=classification["priority"],
                     summary=classification["summary"],
@@ -119,37 +126,46 @@ async def check_source(source_id: int) -> dict:
                     "title": change.get("title", "")[:100]
                 })
 
-            # Process significant text changes
+            # Process significant text changes — only if truly important
             important_text_changes = [c for c in diff_result.text_changes if c.get("important")]
             if important_text_changes and not diff_result.new_items and not diff_result.changed_items:
                 combined_text = "\n".join(c["text"] for c in important_text_changes)
-                detection_data = {
-                    "source": source_name,
-                    "title": f"Text changes on {source_name}",
-                    "content": combined_text,
-                    "detection_type": "text_change",
-                    "changes_summary": diff_result.summary
-                }
-                classification = await classify_update(detection_data)
 
-                det_id = await add_detection(
-                    source_id=source_id,
-                    detection_type="text_change",
-                    title=f"Text changes on {source_name}",
-                    url=source_url,
-                    content=combined_text[:5000],
-                    raw_text=combined_text,
-                    detected_fields={"changes": important_text_changes},
-                    priority=classification["priority"],
-                    summary=classification["summary"],
-                    action=classification["action"],
-                    detected_rewards=classification["detected_rewards"]
-                )
-                detections.append({
-                    "id": det_id,
-                    "type": "text_change",
-                    "priority": classification["priority"]
-                })
+                # Skip if the combined text is too short or looks like nav noise
+                if len(combined_text.strip()) < 50:
+                    logger.info(f"Skipping text_change for {source_name}: combined text too short ({len(combined_text)} chars)")
+                else:
+                    detection_data = {
+                        "source": source_name,
+                        "title": f"Text changes on {source_name}",
+                        "content": combined_text,
+                        "detection_type": "text_change",
+                        "changes_summary": diff_result.summary
+                    }
+                    classification = await classify_update(detection_data)
+
+                    # Only create detection if classifier says MEDIUM or above
+                    if classification["priority"] in ("CRITICAL", "HIGH", "MEDIUM"):
+                        det_id = await add_detection(
+                            source_id=source_id,
+                            detection_type="text_change",
+                            title=f"Text changes on {source_name}",
+                            url=source_url,
+                            content=combined_text[:5000],
+                            raw_text=combined_text,
+                            detected_fields={"changes": important_text_changes},
+                            priority=classification["priority"],
+                            summary=classification["summary"],
+                            action=classification["action"],
+                            detected_rewards=classification["detected_rewards"]
+                        )
+                        detections.append({
+                            "id": det_id,
+                            "type": "text_change",
+                            "priority": classification["priority"]
+                        })
+                    else:
+                        logger.info(f"Skipping LOW text_change for {source_name}: not worth notifying")
 
         return {
             "source": source_name,

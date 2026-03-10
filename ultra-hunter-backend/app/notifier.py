@@ -158,27 +158,32 @@ async def process_notification_queue():
         await send_detection_alert(detection)
         await asyncio.sleep(0.5)
 
-    # Batch MEDIUM and LOW
+    # Send MEDIUM individually (they passed the quality filter)
     medium_detections = await get_unnotified_detections("MEDIUM")
-    low_detections = await get_unnotified_detections("LOW")
+    for detection in medium_detections:
+        await send_detection_alert(detection)
+        await asyncio.sleep(0.5)
 
-    batch = medium_detections + low_detections
-    if batch:
-        if len(batch) <= 3:
-            for detection in batch:
-                await send_detection_alert(detection)
-                await asyncio.sleep(0.5)
-        else:
-            summary = _create_batch_summary(batch)
+    # LOW priority: only batch-summarize if 3+ items, otherwise silently mark notified
+    low_detections = await get_unnotified_detections("LOW")
+    if low_detections:
+        if len(low_detections) >= 3:
+            summary = _create_batch_summary(low_detections)
             success = await send_telegram_message(summary)
             if success:
-                for detection in batch:
+                for detection in low_detections:
                     if detection.get("id"):
                         await mark_detection_notified(detection["id"])
+        else:
+            # Silently mark LOW detections as notified without sending
+            for detection in low_detections:
+                if detection.get("id"):
+                    await mark_detection_notified(detection["id"])
+                    logger.info(f"Silently marked LOW detection #{detection['id']} as notified (not worth sending)")
 
-    total = len(critical_detections) + len(high_detections) + len(batch)
+    total = len(critical_detections) + len(high_detections) + len(medium_detections) + len(low_detections)
     if total > 0:
-        logger.info(f"Processed {total} notifications ({len(critical_detections)} critical, {len(high_detections)} high, {len(batch)} other)")
+        logger.info(f"Processed {total} notifications ({len(critical_detections)} critical, {len(high_detections)} high, {len(medium_detections)} medium, {len(low_detections)} low)")
     return total
 
 

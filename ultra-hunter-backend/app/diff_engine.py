@@ -129,43 +129,60 @@ def _diff_text(old_text: str, new_text: str) -> list[dict]:
     added_lines = new_lines - old_lines
     removed_lines = old_lines - new_lines
 
-    # Filter to only significant lines
+    # Filter to only significant lines — use multi-word phrases to avoid
+    # false positives (e.g., "Events" nav link matching "event")
     important_keywords = [
-        "credit", "pro access", "event", "campaign", "challenge",
-        "registration", "limited", "free", "launch", "workshop",
-        "hackathon", "deadline", "expires", "slots"
+        "new event", "live event", "free credits", "pro access",
+        "new campaign", "campaign launch", "register now",
+        "new challenge", "hackathon", "workshop", "enrollment",
+        "limited time", "limited slots", "deadline", "expires",
+        "credits available", "earn credits", "registration open",
+    ]
+
+    # Boilerplate patterns to skip entirely
+    boilerplate_patterns = [
+        "cookie", "privacy policy", "terms of service", "sign in", "sign up",
+        "toggle navigation", "skip to content", "back to top", "accept all",
+        "only essentials", "customize", "all rights reserved", "follow us",
     ]
 
     for line in added_lines:
         line_lower = line.lower().strip()
-        if len(line_lower) > 10:
-            is_important = any(kw in line_lower for kw in important_keywords)
-            if is_important:
-                changes.append({
-                    "type": "added",
-                    "text": line.strip()[:300],
-                    "important": True,
-                    "keywords": extract_keywords(line)
-                })
-            elif len(line_lower) > 30:
-                changes.append({
-                    "type": "added",
-                    "text": line.strip()[:300],
-                    "important": False,
-                    "keywords": extract_keywords(line)
-                })
+        if len(line_lower) < 20:
+            continue  # Skip very short lines (nav items, labels)
+        # Skip boilerplate
+        if any(bp in line_lower for bp in boilerplate_patterns):
+            continue
+        is_important = any(kw in line_lower for kw in important_keywords)
+        if is_important:
+            changes.append({
+                "type": "added",
+                "text": line.strip()[:300],
+                "important": True,
+                "keywords": extract_keywords(line)
+            })
+        elif len(line_lower) > 60:  # Only include non-important lines if substantial
+            changes.append({
+                "type": "added",
+                "text": line.strip()[:300],
+                "important": False,
+                "keywords": extract_keywords(line)
+            })
 
     for line in removed_lines:
         line_lower = line.lower().strip()
-        if len(line_lower) > 10:
-            is_important = any(kw in line_lower for kw in important_keywords)
-            if is_important:
-                changes.append({
-                    "type": "removed",
-                    "text": line.strip()[:300],
-                    "important": True,
-                    "keywords": extract_keywords(line)
-                })
+        if len(line_lower) < 20:
+            continue
+        if any(bp in line_lower for bp in boilerplate_patterns):
+            continue
+        is_important = any(kw in line_lower for kw in important_keywords)
+        if is_important:
+            changes.append({
+                "type": "removed",
+                "text": line.strip()[:300],
+                "important": True,
+                "keywords": extract_keywords(line)
+            })
 
     return changes[:20]
 
