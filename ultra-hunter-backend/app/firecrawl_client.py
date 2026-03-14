@@ -182,6 +182,113 @@ def extract_discovered_links(html: str, source_url: str) -> list[dict]:
     return discovered
 
 
+async def probe_live_event_urls() -> list[dict]:
+    """Proactively discover live event/campaign URLs that may not be linked in static HTML.
+    
+    Uses multiple strategies:
+    1. Firecrawl map endpoint to crawl manus.im and find subpages
+    2. Sitemap.xml parsing
+    3. Direct HTTP check of known live-events listing page
+    
+    Returns list of discovered link dicts: [{url, text, path}, ...]
+    """
+    discovered = []
+    seen_urls: set[str] = set()
+
+    # Strategy 1: Use Firecrawl map endpoint to discover URLs under manus.im
+    keys = await get_firecrawl_keys()
+    for api_key in keys:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{FIRECRAWL_BASE_URL}/map",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "url": "https://manus.im",
+                        "search": "live-events OR campaign OR events",
+                        "limit": 100,
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    links = data.get("links", [])
+                    logger.info(f"Firecrawl map returned {len(links)} URLs for manus.im")
+                    for link_url in links:
+                        if not isinstance(link_url, str):
+                            continue
+                        parsed = urlparse(link_url)
+                        path = parsed.path.rstrip("/")
+                        for pattern in LINK_DISCOVERY_PATTERNS:
+                            if re.search(pattern, path):
+                                if link_url not in seen_urls:
+                                    seen_urls.add(link_url)
+                                    slug = path.split("/")[-1]
+                                    discovered.append({
+                                        "url": link_url.rstrip("/"),
+                                        "text": slug,
+                                        "path": path,
+                                    })
+                                break
+                    if discovered:
+                        break  # Got results, no need to try next key
+                else:
+                    logger.warning(f"Firecrawl map returned {response.status_code}: {response.text[:200]}")
+        except Exception as e:
+            logger.error(f"Firecrawl map probe error: {e}")
+
+    # Strategy 2: Check sitemap.xml for live event URLs
+    sitemap_urls = [
+        "https://manus.im/sitemap.xml",
+        "https://manus.im/sitemap-0.xml",
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            for sitemap_url in sitemap_urls:
+                try:
+                    resp = await client.get(sitemap_url)
+                    if resp.status_code == 200 and resp.text:
+                        # Parse XML sitemap for URLs matching our patterns
+                        for pattern in LINK_DISCOVERY_PATTERNS:
+                            full_pattern = r'https?://[a-zA-Z0-9.-]*manus\.im' + pattern
+                            for match in re.finditer(full_pattern, resp.text):
+                                url = match.group(0).rstrip('"\'/>')
+                                if url not in seen_urls:
+                                    seen_urls.add(url)
+                                    parsed = urlparse(url)
+                                    slug = parsed.path.rstrip("/").split("/")[-1]
+                                    discovered.append({
+                                        "url": url.rstrip("/"),
+                                        "text": slug,
+                                        "path": parsed.path.rstrip("/"),
+                                    })
+                        logger.info(f"Sitemap {sitemap_url}: found {len(discovered)} relevant URLs so far")
+                except Exception as e:
+                    logger.debug(f"Sitemap {sitemap_url} check failed: {e}")
+    except Exception as e:
+        logger.error(f"Sitemap probe error: {e}")
+
+    # Strategy 3: Scrape the live-events listing page directly (it may work sometimes)
+    try:
+        listing_result = await scrape_with_fallback("https://manus.im/live-events/")
+        if listing_result:
+            html = listing_result.get("html", "")
+            if html and len(html) > 500:  # Not a 404 page
+                links_from_listing = extract_discovered_links(html, "https://manus.im/live-events/")
+                for link in links_from_listing:
+                    if link["url"] not in seen_urls:
+                        seen_urls.add(link["url"])
+                        discovered.append(link)
+                logger.info(f"Live events listing page yielded {len(links_from_listing)} links")
+    except Exception as e:
+        logger.debug(f"Live events listing probe failed: {e}")
+
+    logger.info(f"Proactive URL probe complete: discovered {len(discovered)} total URLs")
+    return discovered
+
+
 # Boilerplate titles/text to ignore (nav items, cookie banners, generic UI elements)
 BOILERPLATE_TITLES = {
     "product", "resources", "compare", "download", "business", "company",

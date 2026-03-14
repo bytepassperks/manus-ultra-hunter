@@ -7,7 +7,6 @@ from app.database import (
     get_all_sources, get_source, get_source_by_name,
     upsert_source, update_source_check, get_latest_snapshot,
     save_snapshot, add_detection, delete_source,
-    get_all_sources,
 )
 from app.firecrawl_client import scrape_with_fallback, parse_scraped_data
 from app.diff_engine import compute_content_diff

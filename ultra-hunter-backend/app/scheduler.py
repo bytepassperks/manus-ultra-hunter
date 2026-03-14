@@ -4,8 +4,9 @@ from datetime import datetime
 from typing import Optional
 
 from app.database import get_all_sources, get_setting
-from app.source_registry import check_source
+from app.source_registry import check_source, _auto_register_discovered_sources
 from app.notifier import process_notification_queue
+from app.firecrawl_client import probe_live_event_urls
 from app.utils.logger import logger
 
 
@@ -53,6 +54,9 @@ class MonitorScheduler:
 
         # Periodically refresh source list
         asyncio.create_task(self._source_refresh_loop(), name="source_refresh")
+
+        # Proactive live event URL discovery (runs every 5 minutes)
+        asyncio.create_task(self._proactive_probe_loop(), name="proactive_probe")
 
         logger.info("Monitoring scheduler started")
 
@@ -162,6 +166,33 @@ class MonitorScheduler:
                 break
             except Exception as e:
                 logger.error(f"Source refresh error: {e}")
+
+    async def _proactive_probe_loop(self):
+        """Periodically probe for new live event/campaign URLs using Firecrawl map, sitemap, etc.
+        
+        This catches JS-rendered content and pages not linked in static HTML.
+        Runs every 5 minutes.
+        """
+        # Initial delay to let other tasks start first
+        await asyncio.sleep(30)
+        while self._running:
+            try:
+                logger.info("Running proactive live event URL probe...")
+                discovered = await probe_live_event_urls()
+                if discovered:
+                    await _auto_register_discovered_sources(discovered, "proactive_probe")
+                    logger.info(f"Proactive probe: processed {len(discovered)} discovered URLs")
+                else:
+                    logger.info("Proactive probe: no new URLs discovered")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Proactive probe error: {e}")
+
+            try:
+                await asyncio.sleep(300)  # Every 5 minutes
+            except asyncio.CancelledError:
+                break
 
     async def trigger_check(self, source_id: int) -> dict:
         """Manually trigger a check for a specific source."""
