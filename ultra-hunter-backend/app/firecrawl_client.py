@@ -123,6 +123,17 @@ LINK_DISCOVERY_PATTERNS = [
     r'/events/[A-Za-z0-9_%-]+',
 ]
 
+# Localized path prefixes to skip (e.g., /fr/live-events/, /de/campaign/)
+# We only want English (root) URLs, not /fr/, /de/, /es/, /ja/, etc.
+_LOCALE_PREFIX_RE = re.compile(
+    r'^/(ar|de|es|es-419|fr|hi|it|ja|ko|pt-br|pt-pt|th|tr|vi|zh-cn|zh-tw)/'
+)
+
+
+def _is_localized_url(path: str) -> bool:
+    """Return True if the URL path starts with a locale prefix like /fr/ or /ja/."""
+    return bool(_LOCALE_PREFIX_RE.match(path))
+
 
 def extract_discovered_links(html: str, source_url: str) -> list[dict]:
     """Extract important subpage links from HTML that should be auto-monitored.
@@ -154,6 +165,10 @@ def extract_discovered_links(html: str, source_url: str) -> list[dict]:
         
         path = parsed.path.rstrip("/")
         
+        # Skip localized versions (e.g., /fr/live-events/, /ja/live-events/)
+        if _is_localized_url(path):
+            continue
+        
         for pattern in LINK_DISCOVERY_PATTERNS:
             if re.search(pattern, path):
                 if full_url not in seen_urls:
@@ -171,12 +186,15 @@ def extract_discovered_links(html: str, source_url: str) -> list[dict]:
         full_pattern = r'https?://[a-zA-Z0-9.-]*manus\.im' + pattern
         for match in re.finditer(full_pattern, html):
             url = match.group(0).rstrip('"\'/)')
+            url_path = urlparse(url).path
+            if _is_localized_url(url_path):
+                continue
             if url not in seen_urls:
                 seen_urls.add(url)
                 discovered.append({
                     "url": url,
                     "text": "",
-                    "path": urlparse(url).path,
+                    "path": url_path,
                 })
     
     return discovered
@@ -221,6 +239,8 @@ async def probe_live_event_urls() -> list[dict]:
                             continue
                         parsed = urlparse(link_url)
                         path = parsed.path.rstrip("/")
+                        if _is_localized_url(path):
+                            continue
                         for pattern in LINK_DISCOVERY_PATTERNS:
                             if re.search(pattern, path):
                                 if link_url not in seen_urls:
@@ -255,14 +275,17 @@ async def probe_live_event_urls() -> list[dict]:
                             full_pattern = r'https?://[a-zA-Z0-9.-]*manus\.im' + pattern
                             for match in re.finditer(full_pattern, resp.text):
                                 url = match.group(0).rstrip('"\'/>')
+                                parsed = urlparse(url)
+                                url_path = parsed.path.rstrip("/")
+                                if _is_localized_url(url_path):
+                                    continue
                                 if url not in seen_urls:
                                     seen_urls.add(url)
-                                    parsed = urlparse(url)
-                                    slug = parsed.path.rstrip("/").split("/")[-1]
+                                    slug = url_path.split("/")[-1]
                                     discovered.append({
                                         "url": url.rstrip("/"),
                                         "text": slug,
-                                        "path": parsed.path.rstrip("/"),
+                                        "path": url_path,
                                     })
                         logger.info(f"Sitemap {sitemap_url}: found {len(discovered)} relevant URLs so far")
                 except Exception as e:
