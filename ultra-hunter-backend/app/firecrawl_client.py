@@ -6,6 +6,9 @@ from datetime import datetime
 from typing import Optional
 from bs4 import BeautifulSoup
 
+import re
+from urllib.parse import urljoin, urlparse
+
 from app.utils.logger import logger
 from app.database import get_setting
 
@@ -37,7 +40,7 @@ async def scrape_with_firecrawl(url: str, api_key: str) -> Optional[dict]:
                 json={
                     "url": url,
                     "formats": ["html", "markdown"],
-                    "onlyMainContent": True
+                    "onlyMainContent": False
                 }
             )
             if response.status_code == 200:
@@ -111,6 +114,72 @@ async def scrape_direct(url: str) -> Optional[dict]:
     except Exception as e:
         logger.error(f"Direct scrape exception for {url}: {e}")
         return None
+
+
+# Patterns for discovering important subpage links (live events, campaigns, etc.)
+LINK_DISCOVERY_PATTERNS = [
+    r'/live-events/[A-Za-z0-9_-]+',
+    r'/campaign/[A-Za-z0-9_-]+',
+    r'/events/[A-Za-z0-9_%-]+',
+]
+
+
+def extract_discovered_links(html: str, source_url: str) -> list[dict]:
+    """Extract important subpage links from HTML that should be auto-monitored.
+    
+    This catches live event pages, campaign pages, etc. that appear as links
+    on the homepage or other pages but aren't in the structured items.
+    """
+    discovered = []
+    seen_urls = set()
+    
+    if not html:
+        return discovered
+    
+    soup = BeautifulSoup(html, "html.parser")
+    base_domain = urlparse(source_url).netloc  # e.g., manus.im
+    
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        if not href or href.startswith("#") or href.startswith("javascript:"):
+            continue
+        
+        # Resolve relative URLs
+        full_url = href if href.startswith("http") else urljoin(source_url, href)
+        parsed = urlparse(full_url)
+        
+        # Only consider links on manus.im domain
+        if "manus.im" not in parsed.netloc:
+            continue
+        
+        path = parsed.path.rstrip("/")
+        
+        for pattern in LINK_DISCOVERY_PATTERNS:
+            if re.search(pattern, path):
+                if full_url not in seen_urls:
+                    seen_urls.add(full_url)
+                    link_text = a_tag.get_text(strip=True)[:200]
+                    discovered.append({
+                        "url": full_url.rstrip("/"),
+                        "text": link_text,
+                        "path": path,
+                    })
+                break
+    
+    # Also search in raw text for URLs (some are in onclick, data attrs, etc.)
+    for pattern in LINK_DISCOVERY_PATTERNS:
+        full_pattern = r'https?://[a-zA-Z0-9.-]*manus\.im' + pattern
+        for match in re.finditer(full_pattern, html):
+            url = match.group(0).rstrip('"\'/)')
+            if url not in seen_urls:
+                seen_urls.add(url)
+                discovered.append({
+                    "url": url,
+                    "text": "",
+                    "path": urlparse(url).path,
+                })
+    
+    return discovered
 
 
 # Boilerplate titles/text to ignore (nav items, cookie banners, generic UI elements)
@@ -270,6 +339,11 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
                     "source_url": source_url
                 })
 
+    # Discover important subpage links (live events, campaigns, etc.)
+    discovered_links = extract_discovered_links(html, source_url)
+    if discovered_links:
+        logger.info(f"Discovered {len(discovered_links)} important links from {source_name}: {[l['url'] for l in discovered_links]}")
+
     return {
         "source": source_name,
         "type": "update",
@@ -280,6 +354,7 @@ def parse_scraped_data(scraped: dict, source_name: str, source_url: str) -> dict
         "detected_fields": {
             "items": items,
             "item_count": len(items),
+            "discovered_links": discovered_links,
         },
         "raw_text": markdown[:10000] if markdown else "",
         "method": scraped.get("method", "unknown")

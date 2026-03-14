@@ -6,7 +6,8 @@ from typing import Optional
 from app.database import (
     get_all_sources, get_source, get_source_by_name,
     upsert_source, update_source_check, get_latest_snapshot,
-    save_snapshot, add_detection, delete_source
+    save_snapshot, add_detection, delete_source,
+    get_all_sources,
 )
 from app.firecrawl_client import scrape_with_fallback, parse_scraped_data
 from app.diff_engine import compute_content_diff
@@ -167,6 +168,11 @@ async def check_source(source_id: int) -> dict:
                     else:
                         logger.info(f"Skipping LOW text_change for {source_name}: not worth notifying")
 
+        # Auto-discover and register new live event / campaign subpages
+        discovered_links = parsed.get("detected_fields", {}).get("discovered_links", [])
+        if discovered_links:
+            await _auto_register_discovered_sources(discovered_links, source_name)
+
         return {
             "source": source_name,
             "has_changes": diff_result.has_changes,
@@ -180,3 +186,45 @@ async def check_source(source_id: int) -> dict:
         logger.error(f"Error checking source {source_name}: {e}", exc_info=True)
         await update_source_check(source_id, "", error=str(e))
         return {"error": str(e), "source": source_name}
+
+
+async def _auto_register_discovered_sources(discovered_links: list, parent_source: str):
+    """Auto-register newly discovered live event / campaign URLs as sources."""
+    existing_sources = await get_all_sources()
+    existing_urls = {s["url"].rstrip("/") for s in existing_sources}
+
+    for link in discovered_links:
+        url = link["url"].rstrip("/")
+        if url in existing_urls:
+            continue  # Already monitoring this URL
+
+        path = link.get("path", "")
+        link_text = link.get("text", "")
+
+        # Generate a name for the source
+        if "/live-events/" in path:
+            slug = path.split("/live-events/")[-1]
+            name = f"Live Event: {link_text or slug}"
+        elif "/campaign/" in path:
+            slug = path.split("/campaign/")[-1]
+            name = f"Campaign: {link_text or slug}"
+        elif "/events/" in path:
+            slug = path.split("/events/")[-1]
+            name = f"Event: {link_text or slug}"
+        else:
+            name = f"Discovered: {link_text or url}"
+
+        name = name[:200]
+        logger.info(f"Auto-registering discovered source: {name} -> {url} (found via {parent_source})")
+
+        try:
+            await upsert_source(
+                name=name,
+                url=url,
+                source_type="webpage",
+                check_interval=30,  # Check live events frequently
+                is_active=True,
+            )
+            logger.info(f"Successfully registered new source: {name}")
+        except Exception as e:
+            logger.error(f"Failed to register discovered source {url}: {e}")
