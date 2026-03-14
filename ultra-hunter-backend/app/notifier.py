@@ -164,22 +164,14 @@ async def process_notification_queue():
         await send_detection_alert(detection)
         await asyncio.sleep(0.5)
 
-    # LOW priority: only batch-summarize if 3+ items, otherwise silently mark notified
+    # LOW priority: ALWAYS silently mark as notified — never send to Telegram
+    # The user does not want LOW priority noise (nav changes, minor text updates, etc.)
     low_detections = await get_unnotified_detections("LOW")
     if low_detections:
-        if len(low_detections) >= 3:
-            summary = _create_batch_summary(low_detections)
-            success = await send_telegram_message(summary)
-            if success:
-                for detection in low_detections:
-                    if detection.get("id"):
-                        await mark_detection_notified(detection["id"])
-        else:
-            # Silently mark LOW detections as notified without sending
-            for detection in low_detections:
-                if detection.get("id"):
-                    await mark_detection_notified(detection["id"])
-                    logger.info(f"Silently marked LOW detection #{detection['id']} as notified (not worth sending)")
+        for detection in low_detections:
+            if detection.get("id"):
+                await mark_detection_notified(detection["id"])
+        logger.info(f"Silently marked {len(low_detections)} LOW detections as notified (suppressed)")
 
     total = len(critical_detections) + len(high_detections) + len(medium_detections) + len(low_detections)
     if total > 0:
@@ -188,7 +180,7 @@ async def process_notification_queue():
 
 
 def _create_batch_summary(detections: list) -> str:
-    """Create a batched summary message for multiple low-priority updates (HTML format)."""
+    """Create a batched summary message for multiple updates (HTML format)."""
     message = "\U0001f4cb <b>MANUS UPDATE BATCH SUMMARY</b>\n\n"
     message += f"<i>{len(detections)} updates detected:</i>\n\n"
 
@@ -196,7 +188,11 @@ def _create_batch_summary(detections: list) -> str:
         priority = det.get("priority", "LOW")
         title = _escape_html(det.get("title", "Unknown")[:100])
         source = _escape_html(det.get("source_name", "Unknown"))
-        message += f"{i}. [{priority}] {title}\n   <i>Source: {source}</i>\n\n"
+        raw_url = det.get("url", "") or ""
+        url_line = ""
+        if raw_url and raw_url.startswith("http"):
+            url_line = f"\n   <a href=\"{_escape_html(raw_url)}\">{_escape_html(raw_url[:80])}</a>"
+        message += f"{i}. [{priority}] {title}\n   <i>Source: {source}</i>{url_line}\n\n"
 
     if len(detections) > 10:
         message += f"<i>... and {len(detections) - 10} more updates</i>\n"

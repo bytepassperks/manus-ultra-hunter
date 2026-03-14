@@ -116,23 +116,38 @@ async def scrape_direct(url: str) -> Optional[dict]:
         return None
 
 
-# Patterns for discovering important subpage links (live events, campaigns, etc.)
+# Patterns for discovering important subpage links (live events, campaigns ONLY)
+# We intentionally do NOT auto-discover individual events.manus.im/events/* pages
+# because there are dozens of them and they generate excessive noise.
 LINK_DISCOVERY_PATTERNS = [
     r'/live-events/[A-Za-z0-9_-]+',
     r'/campaign/[A-Za-z0-9_-]+',
-    r'/events/[A-Za-z0-9_%-]+',
 ]
 
 # Localized path prefixes to skip (e.g., /fr/live-events/, /de/campaign/)
 # We only want English (root) URLs, not /fr/, /de/, /es/, /ja/, etc.
 _LOCALE_PREFIX_RE = re.compile(
-    r'^/(ar|de|es|es-419|fr|hi|it|ja|ko|pt-br|pt-pt|th|tr|vi|zh-cn|zh-tw)/'
+    r'^/(ar|de|es|es-419|fr|hi|it|ja|ko|pt-br|pt-pt|th|tr|vi|zh-cn|zh-tw|zh|pt|en|ru|pl|nl|sv|da|fi|nb|cs|el|hu|ro|bg|uk|hr|sk|sl|lt|lv|et|id|ms|tl|sw)/'
 )
+
+# Known language names to filter out of source names (anchor text from language selectors)
+_LANGUAGE_NAMES = {
+    'english', 'français', 'deutsch', 'español', 'italiano', 'português',
+    'tiếng việt', 'العربية', 'ไทย', 'türkçe', '한국어', '简体中文', '繁體中文',
+    'हिन्दी', '日本語', 'русский', 'polski', 'nederlands', 'svenska',
+    'português (brasil)', 'português (portugal)', 'español (latinoamérica)',
+    'bahasa indonesia', 'bahasa melayu', 'filipino', 'kiswahili',
+}
 
 
 def _is_localized_url(path: str) -> bool:
     """Return True if the URL path starts with a locale prefix like /fr/ or /ja/."""
     return bool(_LOCALE_PREFIX_RE.match(path))
+
+
+def _is_language_name(text: str) -> bool:
+    """Return True if the text is a known language name (from language selectors)."""
+    return text.strip().lower() in _LANGUAGE_NAMES
 
 
 def extract_discovered_links(html: str, source_url: str) -> list[dict]:
@@ -159,8 +174,8 @@ def extract_discovered_links(html: str, source_url: str) -> list[dict]:
         full_url = href if href.startswith("http") else urljoin(source_url, href)
         parsed = urlparse(full_url)
         
-        # Only consider links on manus.im domain
-        if "manus.im" not in parsed.netloc:
+        # Only consider links on manus.im domain (NOT events.manus.im or academy.manus.im)
+        if parsed.netloc not in ("manus.im", "www.manus.im"):
             continue
         
         path = parsed.path.rstrip("/")
@@ -174,6 +189,10 @@ def extract_discovered_links(html: str, source_url: str) -> list[dict]:
                 if full_url not in seen_urls:
                     seen_urls.add(full_url)
                     link_text = a_tag.get_text(strip=True)[:200]
+                    # Skip if link text is a language name (from language selectors)
+                    if _is_language_name(link_text):
+                        # Use the URL slug instead
+                        link_text = path.split("/")[-1]
                     discovered.append({
                         "url": full_url.rstrip("/"),
                         "text": link_text,
@@ -226,7 +245,7 @@ async def probe_live_event_urls() -> list[dict]:
                     },
                     json={
                         "url": "https://manus.im",
-                        "search": "live-events OR campaign OR events",
+                        "search": "live-events OR campaign",
                         "limit": 100,
                     }
                 )
@@ -238,6 +257,9 @@ async def probe_live_event_urls() -> list[dict]:
                         if not isinstance(link_url, str):
                             continue
                         parsed = urlparse(link_url)
+                        # Only manus.im domain, not subdomains
+                        if parsed.netloc not in ("manus.im", "www.manus.im"):
+                            continue
                         path = parsed.path.rstrip("/")
                         if _is_localized_url(path):
                             continue
@@ -259,7 +281,7 @@ async def probe_live_event_urls() -> list[dict]:
         except Exception as e:
             logger.error(f"Firecrawl map probe error: {e}")
 
-    # Strategy 2: Check sitemap.xml for live event URLs
+    # Strategy 2: Check sitemap.xml for live event/campaign URLs (only manus.im, not subdomains)
     sitemap_urls = [
         "https://manus.im/sitemap.xml",
         "https://manus.im/sitemap-0.xml",
@@ -272,7 +294,8 @@ async def probe_live_event_urls() -> list[dict]:
                     if resp.status_code == 200 and resp.text:
                         # Parse XML sitemap for URLs matching our patterns
                         for pattern in LINK_DISCOVERY_PATTERNS:
-                            full_pattern = r'https?://[a-zA-Z0-9.-]*manus\.im' + pattern
+                            # Only match manus.im exactly, not subdomains
+                            full_pattern = r'https?://(?:www\.)?manus\.im' + pattern
                             for match in re.finditer(full_pattern, resp.text):
                                 url = match.group(0).rstrip('"\'/>')
                                 parsed = urlparse(url)

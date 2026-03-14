@@ -8,7 +8,7 @@ from app.database import (
     upsert_source, update_source_check, get_latest_snapshot,
     save_snapshot, add_detection, delete_source,
 )
-from app.firecrawl_client import scrape_with_fallback, parse_scraped_data
+from app.firecrawl_client import scrape_with_fallback, parse_scraped_data, _is_language_name, _is_localized_url
 from app.diff_engine import compute_content_diff
 from app.ai_classifier import classify_update
 from app.utils.hashing import compute_hash
@@ -188,10 +188,17 @@ async def check_source(source_id: int) -> dict:
 
 
 async def _auto_register_discovered_sources(discovered_links: list, parent_source: str):
-    """Auto-register newly discovered live event / campaign URLs as sources."""
+    """Auto-register newly discovered live event / campaign URLs as sources.
+    
+    Only registers manus.im/live-events/* and manus.im/campaign/* pages.
+    Filters out localized URLs and language-name link texts.
+    """
+    from urllib.parse import urlparse
+    
     existing_sources = await get_all_sources()
     existing_urls = {s["url"].rstrip("/") for s in existing_sources}
 
+    registered_count = 0
     for link in discovered_links:
         url = link["url"].rstrip("/")
         if url in existing_urls:
@@ -199,21 +206,45 @@ async def _auto_register_discovered_sources(discovered_links: list, parent_sourc
 
         path = link.get("path", "")
         link_text = link.get("text", "")
-
-        # Generate a name for the source
+        
+        parsed = urlparse(url)
+        
+        # STRICT: Only register manus.im domain (not subdomains like events.manus.im)
+        if parsed.netloc not in ("manus.im", "www.manus.im"):
+            logger.debug(f"Skipping non-manus.im URL: {url}")
+            continue
+        
+        # STRICT: Only register /live-events/* and /campaign/* paths
+        if not ("/live-events/" in path or "/campaign/" in path):
+            logger.debug(f"Skipping non-live-events/campaign URL: {url}")
+            continue
+        
+        # Skip localized URLs
+        if _is_localized_url(path):
+            logger.debug(f"Skipping localized URL: {url}")
+            continue
+        
+        # Use URL slug for the name, NOT the link text (which may be a language name)
         if "/live-events/" in path:
             slug = path.split("/live-events/")[-1]
-            name = f"Live Event: {link_text or slug}"
+            # If link_text is a language name or empty, use slug
+            if not link_text or _is_language_name(link_text):
+                name = f"Live Event: {slug}"
+            else:
+                name = f"Live Event: {slug}"  # Always use slug for consistency
         elif "/campaign/" in path:
             slug = path.split("/campaign/")[-1]
-            name = f"Campaign: {link_text or slug}"
-        elif "/events/" in path:
-            slug = path.split("/events/")[-1]
-            name = f"Event: {link_text or slug}"
+            name = f"Campaign: {slug}"
         else:
-            name = f"Discovered: {link_text or url}"
+            continue  # Should not reach here
 
         name = name[:200]
+        
+        # Final safety check: don't register if slug is empty or too short
+        if not slug or len(slug) < 2:
+            logger.debug(f"Skipping URL with empty/short slug: {url}")
+            continue
+        
         logger.info(f"Auto-registering discovered source: {name} -> {url} (found via {parent_source})")
 
         try:
@@ -224,6 +255,10 @@ async def _auto_register_discovered_sources(discovered_links: list, parent_sourc
                 check_interval=30,  # Check live events frequently
                 is_active=True,
             )
+            registered_count += 1
             logger.info(f"Successfully registered new source: {name}")
         except Exception as e:
             logger.error(f"Failed to register discovered source {url}: {e}")
+    
+    if registered_count > 0:
+        logger.info(f"Auto-registered {registered_count} new sources from {parent_source}")

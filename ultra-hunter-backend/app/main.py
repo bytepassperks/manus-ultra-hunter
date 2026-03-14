@@ -279,6 +279,54 @@ async def reset_system():
     return {"status": "ok", "message": "All detections and snapshots cleared. Next scan will establish fresh baseline."}
 
 
+@app.post("/api/actions/cleanup-sources")
+async def cleanup_sources():
+    """Delete all auto-registered sources that aren't core 9 or key live events/campaigns.
+    
+    Keeps: core 9 sources + manus.im/live-events/* + manus.im/campaign/* 
+    Deletes: events.manus.im/events/* individual pages, academy.manus.im/events/*, localized garbage
+    """
+    from urllib.parse import urlparse
+    
+    sources = await get_all_sources()
+    core_names = {
+        "Manus Live Events", "Manus Campaigns", "Manus Help", "Manus Blog",
+        "Manus Homepage", "Manus Academy Challenges", "Manus Events Hub",
+        "Manus Twitter/X", "BuildClub Announcements",
+    }
+    
+    deleted = []
+    kept = []
+    for source in sources:
+        name = source["name"]
+        url = source["url"]
+        parsed = urlparse(url)
+        
+        # Always keep core sources
+        if name in core_names:
+            kept.append(name)
+            continue
+        
+        # Keep manus.im/live-events/* and manus.im/campaign/* (non-localized)
+        if parsed.netloc in ("manus.im", "www.manus.im"):
+            path = parsed.path.rstrip("/")
+            if "/live-events/" in path or "/campaign/" in path:
+                kept.append(name)
+                continue
+        
+        # Delete everything else (events.manus.im pages, academy pages, etc.)
+        await delete_source(source["id"])
+        deleted.append({"id": source["id"], "name": name, "url": url})
+    
+    logger.info(f"Cleanup: deleted {len(deleted)} sources, kept {len(kept)}")
+    return {
+        "status": "ok",
+        "deleted_count": len(deleted),
+        "kept_count": len(kept),
+        "deleted": deleted[:50],
+    }
+
+
 @app.get("/api/dashboard")
 async def dashboard():
     stats = await get_detection_stats()
